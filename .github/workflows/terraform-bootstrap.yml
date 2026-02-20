@@ -1,0 +1,129 @@
+name: Terraform Bootstrap
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_bootstrap:
+        description: 'Type "bootstrap" to confirm creation of backend resources'
+        required: true
+        type: string
+
+jobs:
+  bootstrap:
+    name: Bootstrap Backend Resources
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Validate confirmation
+        run: |
+          if [ "${{ github.event.inputs.confirm_bootstrap }}" != "bootstrap" ]; then
+            echo "❌ Bootstrap not confirmed. You must type 'bootstrap' to proceed."
+            exit 1
+          fi
+          echo "✅ Bootstrap confirmed"
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Validate Secrets
+        run: |
+          if [ -z "${{ secrets.AWS_ACCESS_KEY_ID }}" ]; then
+            echo "❌ Error: AWS_ACCESS_KEY_ID secret is not set"
+            exit 1
+          fi
+          if [ -z "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]; then
+            echo "❌ Error: AWS_SECRET_ACCESS_KEY secret is not set"
+            exit 1
+          fi
+          if [ -z "${{ secrets.AWS_REGION }}" ]; then
+            echo "❌ Error: AWS_REGION secret is not set"
+            exit 1
+          fi
+          echo "✅ All required secrets are set"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Get AWS Account ID
+        id: account
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          BUCKET_NAME="ami-healer-terraform-state-${ACCOUNT_ID}"
+          echo "account_id=${ACCOUNT_ID}" >> $GITHUB_OUTPUT
+          echo "bucket_name=${BUCKET_NAME}" >> $GITHUB_OUTPUT
+          echo "✅ AWS Account ID: ${ACCOUNT_ID}"
+          echo "✅ Bucket name will be: ${BUCKET_NAME}"
+
+      - name: Check if bucket already exists
+        id: check-bucket
+        run: |
+          if aws s3api head-bucket --bucket "${{ steps.account.outputs.bucket_name }}" 2>/dev/null; then
+            echo "✅ S3 bucket ${{ steps.account.outputs.bucket_name }} already exists"
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "ℹ️  S3 bucket ${{ steps.account.outputs.bucket_name }} does not exist, will create"
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check if DynamoDB table already exists
+        id: check-table
+        run: |
+          if aws dynamodb describe-table --table-name "ami-healer-terraform-locks" --region "${{ secrets.AWS_REGION }}" >/dev/null 2>&1; then
+            echo "✅ DynamoDB table ami-healer-terraform-locks already exists"
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "ℹ️  DynamoDB table ami-healer-terraform-locks does not exist, will create"
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.5.0
+          terraform_wrapper: false
+
+      - name: Terraform Init (Local Backend)
+        working-directory: terraform
+        run: terraform init -backend=false
+
+      - name: Create Backend Resources
+        if: steps.check-bucket.outputs.exists == 'false' || steps.check-table.outputs.exists == 'false'
+        working-directory: terraform
+        run: |
+          echo "Creating backend resources..."
+          terraform apply -auto-approve \
+            -target=aws_s3_bucket.terraform_state \
+            -target=aws_s3_bucket_versioning.terraform_state \
+            -target=aws_s3_bucket_server_side_encryption_configuration.terraform_state \
+            -target=aws_s3_bucket_public_access_block.terraform_state \
+            -target=aws_dynamodb_table.terraform_locks
+
+      - name: Migrate to S3 Backend
+        if: steps.check-bucket.outputs.exists == 'false' || steps.check-table.outputs.exists == 'false'
+        working-directory: terraform
+        run: |
+          echo "Migrating state to S3 backend..."
+          terraform init -migrate-state \
+            -backend-config="bucket=${{ steps.account.outputs.bucket_name }}" \
+            -backend-config="region=${{ secrets.AWS_REGION }}" \
+            -backend-config="dynamodb_table=ami-healer-terraform-locks"
+
+      - name: Bootstrap Summary
+        run: |
+          echo "## ✅ Bootstrap Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Backend Resources:" >> $GITHUB_STEP_SUMMARY
+          echo "- **S3 Bucket**: \`${{ steps.account.outputs.bucket_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **DynamoDB Table**: \`ami-healer-terraform-locks\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Optional: Set GitHub Secrets" >> $GITHUB_STEP_SUMMARY
+          echo "You can optionally set these secrets (workflows will auto-detect if not set):" >> $GITHUB_STEP_SUMMARY
+          echo "- \`TF_STATE_BUCKET\`: \`${{ steps.account.outputs.bucket_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`TF_STATE_LOCK_TABLE\`: \`ami-healer-terraform-locks\`" >> $GITHUB_STEP_SUMMARY

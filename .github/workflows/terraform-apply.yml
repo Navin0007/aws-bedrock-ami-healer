@@ -70,21 +70,22 @@ jobs:
           echo "table=${FINAL_TABLE}" >> $GITHUB_OUTPUT
           echo "region=${{ secrets.AWS_REGION }}" >> $GITHUB_OUTPUT
           
-          # Check if bucket exists
+          # Check if bucket exists, if not, create it
           if aws s3api head-bucket --bucket "${FINAL_BUCKET}" 2>/dev/null; then
             echo "✅ S3 bucket ${FINAL_BUCKET} exists"
+            echo "bucket_created=false" >> $GITHUB_OUTPUT
           else
-            echo "❌ Error: S3 bucket ${FINAL_BUCKET} does not exist"
-            echo ""
-            echo "Please bootstrap the backend resources first by running locally:"
-            echo "  cd terraform"
-            echo "  terraform init -backend=false"
-            echo "  terraform apply -target=aws_s3_bucket.terraform_state \\"
-            echo "                 -target=aws_s3_bucket_versioning.terraform_state \\"
-            echo "                 -target=aws_s3_bucket_server_side_encryption_configuration.terraform_state \\"
-            echo "                 -target=aws_s3_bucket_public_access_block.terraform_state \\"
-            echo "                 -target=aws_dynamodb_table.terraform_locks"
-            exit 1
+            echo "⚠️  S3 bucket ${FINAL_BUCKET} does not exist, will create it"
+            echo "bucket_created=true" >> $GITHUB_OUTPUT
+          fi
+          
+          # Check if DynamoDB table exists, if not, create it
+          if aws dynamodb describe-table --table-name "${FINAL_TABLE}" --region "${{ secrets.AWS_REGION }}" >/dev/null 2>&1; then
+            echo "✅ DynamoDB table ${FINAL_TABLE} exists"
+            echo "table_created=false" >> $GITHUB_OUTPUT
+          else
+            echo "⚠️  DynamoDB table ${FINAL_TABLE} does not exist, will create it"
+            echo "table_created=true" >> $GITHUB_OUTPUT
           fi
 
       - name: Setup Terraform
@@ -92,6 +93,25 @@ jobs:
         with:
           terraform_version: 1.5.0
           terraform_wrapper: false
+
+      - name: Create Backend Resources if Needed
+        if: steps.backend-config.outputs.bucket_created == 'true' || steps.backend-config.outputs.table_created == 'true'
+        working-directory: terraform
+        run: |
+          echo "Creating backend resources..."
+          terraform init -backend=false
+          if [ "${{ steps.backend-config.outputs.bucket_created }}" == "true" ]; then
+            terraform apply -auto-approve \
+              -target=aws_s3_bucket.terraform_state \
+              -target=aws_s3_bucket_versioning.terraform_state \
+              -target=aws_s3_bucket_server_side_encryption_configuration.terraform_state \
+              -target=aws_s3_bucket_public_access_block.terraform_state
+          fi
+          if [ "${{ steps.backend-config.outputs.table_created }}" == "true" ]; then
+            terraform apply -auto-approve -target=aws_dynamodb_table.terraform_locks
+          fi
+          # Clean up local state since we'll use S3 backend
+          rm -rf .terraform/terraform.tfstate .terraform/terraform.tfstate.backup
 
       - name: Terraform Init
         working-directory: terraform
