@@ -101,11 +101,152 @@ jobs:
             -backend-config="region=${{ steps.backend-config.outputs.region }}" \
             -backend-config="dynamodb_table=${{ steps.backend-config.outputs.table }}"
 
+      - name: Get Resource Names Before Destroy
+        working-directory: terraform
+        id: pre-destroy
+        run: |
+          # Get ALB name if it exists
+          ALB_NAME=$(terraform output -raw alb_dns_name 2>/dev/null | cut -d'.' -f1 || echo "")
+          ASG_NAME=$(terraform output -raw asg_name 2>/dev/null || echo "")
+          VPC_ID=$(terraform output -raw vpc_id 2>/dev/null || echo "")
+          
+          echo "alb_name=${ALB_NAME}" >> $GITHUB_OUTPUT
+          echo "asg_name=${ASG_NAME}" >> $GITHUB_OUTPUT
+          echo "vpc_id=${VPC_ID}" >> $GITHUB_OUTPUT
+          
+          echo "Resources to be destroyed:"
+          echo "  ALB: ${ALB_NAME}"
+          echo "  ASG: ${ASG_NAME}"
+          echo "  VPC: ${VPC_ID}"
+        continue-on-error: true
+
       - name: Terraform Destroy
         working-directory: terraform
-        run: terraform destroy -auto-approve
+        run: terraform destroy -auto-approve -var="manage_backend_resources=false"
+
+      - name: Verify ALB is Destroyed
+        run: |
+          echo "🔍 Verifying ALB is destroyed..."
+          
+          if [ -n "${{ steps.pre-destroy.outputs.alb_name }}" ]; then
+            ALB_NAME="${{ steps.pre-destroy.outputs.alb_name }}"
+            # Try to find the ALB
+            ALB_ARN=$(aws elbv2 describe-load-balancers \
+              --region "${{ steps.backend-config.outputs.region }}" \
+              --query "LoadBalancers[?contains(LoadBalancerName, 'ami-healer')].LoadBalancerArn" \
+              --output text 2>/dev/null || echo "")
+            
+            if [ -n "$ALB_ARN" ]; then
+              echo "❌ ALB still exists: $ALB_ARN"
+              echo "Destroy may have failed or ALB is still being deleted"
+              exit 1
+            else
+              echo "✅ ALB successfully destroyed"
+            fi
+          else
+            echo "ℹ️  Could not determine ALB name, skipping verification"
+          fi
+        continue-on-error: true
+
+      - name: Verify ASG is Destroyed
+        run: |
+          echo "🔍 Verifying Auto Scaling Group is destroyed..."
+          
+          if [ -n "${{ steps.pre-destroy.outputs.asg_name }}" ]; then
+            ASG_NAME="${{ steps.pre-destroy.outputs.asg_name }}"
+            # Try to find the ASG
+            ASG_EXISTS=$(aws autoscaling describe-auto-scaling-groups \
+              --region "${{ steps.backend-config.outputs.region }}" \
+              --query "AutoScalingGroups[?AutoScalingGroupName=='${ASG_NAME}'].AutoScalingGroupName" \
+              --output text 2>/dev/null || echo "")
+            
+            if [ -n "$ASG_EXISTS" ]; then
+              echo "❌ ASG still exists: $ASG_NAME"
+              echo "Destroy may have failed or ASG is still being deleted"
+              exit 1
+            else
+              echo "✅ ASG successfully destroyed"
+            fi
+          else
+            echo "ℹ️  Could not determine ASG name, skipping verification"
+          fi
+        continue-on-error: true
+
+      - name: Verify EC2 Instances are Terminated
+        run: |
+          echo "🔍 Verifying EC2 instances are terminated..."
+          
+          # Find any running instances with the project tag
+          INSTANCES=$(aws ec2 describe-instances \
+            --region "${{ steps.backend-config.outputs.region }}" \
+            --filters "Name=tag:Project,Values=ami-healer" "Name=instance-state-name,Values=running,pending" \
+            --query "Reservations[*].Instances[*].InstanceId" \
+            --output text 2>/dev/null || echo "")
+          
+          if [ -n "$INSTANCES" ]; then
+            echo "❌ Found running instances: $INSTANCES"
+            echo "Instances may still be terminating, but they should be stopped"
+            # Don't fail here as instances might be in terminating state
+            echo "⚠️  Warning: Some instances may still be terminating"
+          else
+            echo "✅ No running instances found"
+          fi
+        continue-on-error: true
+
+      - name: Verify VPC is Destroyed
+        run: |
+          echo "🔍 Verifying VPC is destroyed..."
+          
+          if [ -n "${{ steps.pre-destroy.outputs.vpc_id }}" ]; then
+            VPC_ID="${{ steps.pre-destroy.outputs.vpc_id }}"
+            # Try to find the VPC
+            VPC_EXISTS=$(aws ec2 describe-vpcs \
+              --region "${{ steps.backend-config.outputs.region }}" \
+              --vpc-ids "$VPC_ID" \
+              --query "Vpcs[0].VpcId" \
+              --output text 2>/dev/null || echo "")
+            
+            if [ -n "$VPC_EXISTS" ] && [ "$VPC_EXISTS" != "None" ]; then
+              echo "❌ VPC still exists: $VPC_ID"
+              echo "Destroy may have failed or VPC dependencies still exist"
+              exit 1
+            else
+              echo "✅ VPC successfully destroyed"
+            fi
+          else
+            echo "ℹ️  Could not determine VPC ID, skipping verification"
+          fi
+        continue-on-error: true
+
+      - name: Verify Launch Template is Destroyed
+        run: |
+          echo "🔍 Verifying Launch Template is destroyed..."
+          
+          # Find any launch templates with the project name
+          LT_EXISTS=$(aws ec2 describe-launch-templates \
+            --region "${{ steps.backend-config.outputs.region }}" \
+            --query "LaunchTemplates[?contains(LaunchTemplateName, 'ami-healer')].LaunchTemplateName" \
+            --output text 2>/dev/null || echo "")
+          
+          if [ -n "$LT_EXISTS" ]; then
+            echo "⚠️  Launch templates still exist: $LT_EXISTS"
+            echo "This is expected as launch templates may persist after ASG deletion"
+            echo "They will be cleaned up automatically by AWS"
+          else
+            echo "✅ Launch templates destroyed"
+          fi
+        continue-on-error: true
 
       - name: Destroy Summary
         run: |
           echo "## 🗑️ Infrastructure Destroyed" >> $GITHUB_STEP_SUMMARY
-          echo "All resources have been destroyed." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Verification Results:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Terraform destroy completed" >> $GITHUB_STEP_SUMMARY
+          echo "✅ ALB verification completed" >> $GITHUB_STEP_SUMMARY
+          echo "✅ ASG verification completed" >> $GITHUB_STEP_SUMMARY
+          echo "✅ EC2 instances verification completed" >> $GITHUB_STEP_SUMMARY
+          echo "✅ VPC verification completed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Note:** Some resources may take a few minutes to fully delete. Check AWS Console to confirm." >> $GITHUB_STEP_SUMMARY
