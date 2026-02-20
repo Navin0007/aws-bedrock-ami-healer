@@ -157,35 +157,6 @@ jobs:
             -backend-config="region=${{ steps.backend-config.outputs.region }}" \
             -backend-config="dynamodb_table=${{ steps.backend-config.outputs.table }}"
 
-      - name: Import Backend Resources if Created
-        if: steps.backend-config.outputs.bucket_created == 'true' || steps.backend-config.outputs.table_created == 'true'
-        working-directory: terraform
-        run: |
-          # Import S3 bucket and related resources if they were just created
-          if [ "${{ steps.backend-config.outputs.bucket_created }}" == "true" ]; then
-            echo "Importing S3 bucket into Terraform state..."
-            if ! terraform state show aws_s3_bucket.terraform_state >/dev/null 2>&1; then
-              terraform import aws_s3_bucket.terraform_state "${{ steps.backend-config.outputs.bucket }}" || echo "Bucket may already be in state"
-            fi
-            if ! terraform state show aws_s3_bucket_versioning.terraform_state >/dev/null 2>&1; then
-              terraform import aws_s3_bucket_versioning.terraform_state "${{ steps.backend-config.outputs.bucket }}" || echo "Versioning may already be in state"
-            fi
-            if ! terraform state show aws_s3_bucket_server_side_encryption_configuration.terraform_state >/dev/null 2>&1; then
-              terraform import aws_s3_bucket_server_side_encryption_configuration.terraform_state "${{ steps.backend-config.outputs.bucket }}" || echo "Encryption may already be in state"
-            fi
-            if ! terraform state show aws_s3_bucket_public_access_block.terraform_state >/dev/null 2>&1; then
-              terraform import aws_s3_bucket_public_access_block.terraform_state "${{ steps.backend-config.outputs.bucket }}" || echo "Public access block may already be in state"
-            fi
-          fi
-          
-          # Import DynamoDB table if it was just created
-          if [ "${{ steps.backend-config.outputs.table_created }}" == "true" ]; then
-            echo "Importing DynamoDB table into Terraform state..."
-            if ! terraform state show aws_dynamodb_table.terraform_locks >/dev/null 2>&1; then
-              terraform import aws_dynamodb_table.terraform_locks "${{ steps.backend-config.outputs.table }}" || echo "Table may already be in state"
-            fi
-          fi
-
       - name: Terraform Format Check
         id: fmt
         working-directory: terraform
@@ -201,7 +172,7 @@ jobs:
       - name: Terraform Plan
         id: plan
         working-directory: terraform
-        run: terraform plan -no-color -out=tfplan
+        run: terraform plan -no-color -out=tfplan -var="manage_backend_resources=false"
         continue-on-error: true
 
       - name: Comment PR

@@ -45,12 +45,12 @@ output "working_ami_id" {
 
 output "terraform_state_bucket" {
   description = "S3 bucket name for Terraform remote state"
-  value       = aws_s3_bucket.terraform_state.id
+  value       = var.manage_backend_resources ? aws_s3_bucket.terraform_state[0].id : "ami-healer-terraform-state-${data.aws_caller_identity.current.account_id}"
 }
 
 output "terraform_lock_table" {
   description = "DynamoDB table name for Terraform state locking"
-  value       = aws_dynamodb_table.terraform_locks.name
+  value       = var.manage_backend_resources ? aws_dynamodb_table.terraform_locks[0].name : "ami-healer-terraform-locks"
 }
 
 output "aws_account_id" {

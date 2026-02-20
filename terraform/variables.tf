@@ -63,3 +63,9 @@ variable "health_check_path" {
   type        = string
   default     = "/health"
 }
+
+variable "manage_backend_resources" {
+  description = "Whether to manage S3 bucket and DynamoDB table for Terraform state (set to false if managed externally)"
+  type        = bool
+  default     = false
+}
