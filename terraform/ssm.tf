@@ -7,8 +7,8 @@
 # IMPORTANT: SSM paths use var.project_name (default: "ami-healer")
 # All paths will be: /ami-healer/infra/<parameter-name>
 # Ensure the SSM repo uses the same project_name value for path alignment.
-
-data "aws_caller_identity" "current" {}
+#
+# Note: data.aws_caller_identity.current is declared in backend_resources.tf
 
 resource "aws_ssm_parameter" "infra_vpc_id" {
   name        = "/${var.project_name}/infra/vpc-id"
