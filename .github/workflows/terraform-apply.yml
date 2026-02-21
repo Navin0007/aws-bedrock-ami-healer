@@ -7,6 +7,13 @@ on:
     paths:
       - 'terraform/**'
       - '.github/workflows/terraform-apply.yml'
+  workflow_dispatch:
+    inputs:
+      skip_health_check:
+        description: 'Skip health check verification (optional)'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   apply:
@@ -182,6 +189,7 @@ jobs:
           echo "Health Check: \`${HEALTH_URL}\`" >> $GITHUB_STEP_SUMMARY
 
       - name: Wait for ALB to be Ready
+        if: github.event.inputs.skip_health_check != 'true'
         working-directory: terraform
         run: |
           echo "⏳ Waiting for ALB to become active and instances to register..."
@@ -219,6 +227,7 @@ jobs:
           fi
 
       - name: Test Health Endpoint
+        if: github.event.inputs.skip_health_check != 'true'
         working-directory: terraform
         run: |
           HEALTH_URL=$(terraform output -raw health_check_url)
@@ -273,6 +282,7 @@ jobs:
           echo "🎉 Deployment is healthy and working correctly!"
 
       - name: Health Check Summary
+        if: github.event.inputs.skip_health_check != 'true'
         run: |
           echo "## ✅ Health Check Results" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
